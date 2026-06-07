@@ -24,7 +24,13 @@ import genesis as gs
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--px4-dir", type=str, required=True, help="Path to a built PX4-Autopilot checkout.")
-    parser.add_argument("--airframe", type=str, default="gz_x500", help="PX4 SIM model (PX4_SIM_MODEL).")
+    parser.add_argument(
+        "--airframe",
+        type=str,
+        default="none_iris",
+        help="PX4 SIM model (PX4_SIM_MODEL). Use a non-'gz_' airframe (e.g. none_iris) so PX4 "
+        "connects to Genesis via simulator_mavlink instead of launching Gazebo.",
+    )
     parser.add_argument("--n-envs", type=int, default=1, help="Number of parallel drones / PX4 instances.")
     parser.add_argument("--steps", type=int, default=200000)
     parser.add_argument("-v", "--vis", action="store_true", default=False)

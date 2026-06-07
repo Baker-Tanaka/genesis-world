@@ -72,6 +72,12 @@ class PX4Bridge:
         # Last commanded RPM (B, n_prop); applied when an instance reports no fresh command.
         self._last_rpm = np.zeros((self._B, self._n_prop), dtype=np.float64)
 
+        # Per-instance flag: True once PX4 has delivered its first actuator command. PX4 only
+        # starts emitting commands after it has booted off a continuous HIL_SENSOR stream, so
+        # until then we must not block waiting for it (that would deadlock). After the first
+        # command we hold strict lockstep for that instance.
+        self._established = [False] * self._B
+
     # ====================================================================== lifecycle
     def start(self) -> "PX4Bridge":
         """Open the simulator TCP servers, (optionally) spawn PX4, connect, and hook step()."""
@@ -79,6 +85,9 @@ class PX4Bridge:
             gs.raise_exception("PX4Bridge.start() called twice.")
 
         dt = self._scene.dt
+        # PX4's lockstep IMU integration rejects a zero/non-increasing timestamp (vehicle_imu
+        # logs a "timestamp error" and never publishes), so start one dt in rather than at 0.
+        self._sim_time = dt
         self._gps_every = max(1, round(1.0 / (self._options.gps_hz * dt))) if self._options.gps_hz > 0 else 1
         self._mag_every = max(1, round(1.0 / (self._options.mag_hz * dt))) if self._options.mag_hz > 0 else 1
         self._baro_every = max(1, round(1.0 / (self._options.baro_hz * dt))) if self._options.baro_hz > 0 else 1
@@ -274,29 +283,44 @@ class PX4Bridge:
         }
 
     def _recv_actuators(self):
-        """Block until each instance has delivered a HIL_ACTUATOR_CONTROLS (lockstep)."""
+        """Collect one HIL_ACTUATOR_CONTROLS per instance.
+
+        Strict lockstep (block until the command arrives) only applies to instances that have
+        already produced their first command. Instances still booting are polled non-blockingly:
+        PX4 emits no actuator output until it has booted off a continuous HIL_SENSOR stream, so
+        blocking on that first command would deadlock the exchange against PX4's own startup.
+        """
         controls: list = [None] * self._B
         armed: list = [False] * self._B
-        pending = set(range(self._B))
-        deadline = time.monotonic() + self._options.connect_timeout
+        # Only instances already in lockstep are required to deliver a command this step.
+        pending = {i for i in range(self._B) if self._established[i]}
 
+        def consume(events):
+            for key, _ in events:
+                i = key.data
+                try:
+                    msgs = self._conns[i].poll_messages()
+                except ConnectionError:
+                    gs.raise_exception(f"PX4 instance {i} disconnected during lockstep.")
+                for msg in msgs:
+                    if msg.get_type() == _HIL_ACTUATOR_CONTROLS:
+                        controls[i], armed[i] = mio.parse_actuator_controls(msg)
+                        self._established[i] = True
+                        pending.discard(i)
+
+        # Non-blocking pass: lets still-booting instances report their first command (if any)
+        # without forcing us to wait on them.
+        consume(self._selector.select(timeout=0))
+
+        # Blocking pass: hold strict lockstep for every instance already producing commands.
+        deadline = time.monotonic() + self._options.connect_timeout
         while pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 gs.raise_exception(
                     f"Lockstep timeout: no actuator command from PX4 instances {sorted(pending)}."
                 )
-            for key, _ in self._selector.select(timeout=remaining):
-                i = key.data
-                conn = self._conns[i]
-                try:
-                    msgs = conn.poll_messages()
-                except ConnectionError:
-                    gs.raise_exception(f"PX4 instance {i} disconnected during lockstep.")
-                for msg in msgs:
-                    if msg.get_type() == _HIL_ACTUATOR_CONTROLS:
-                        controls[i], armed[i] = mio.parse_actuator_controls(msg)
-                        pending.discard(i)
+            consume(self._selector.select(timeout=remaining))
         return controls, armed
 
     def _apply_rpm(self, rpm: np.ndarray) -> None:

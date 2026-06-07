@@ -28,8 +28,10 @@ class PX4Options(Options):
     build_dir: str = "build/px4_sitl_default"
     """Build subdirectory of ``px4_dir`` holding ``bin/px4`` and ``etc/`` (rootfs)."""
 
-    airframe: str = "gz_x500"
-    """PX4 simulator model, exported as ``PX4_SIM_MODEL`` (e.g. ``gz_x500``, ``iris``)."""
+    airframe: str = "none_iris"
+    """PX4 simulator model, exported as ``PX4_SIM_MODEL``. Use a non-``gz_`` airframe (e.g.
+    ``none_iris``) so PX4 starts ``simulator_mavlink`` and connects out to the Genesis bridge
+    over TCP. A ``gz_*`` model makes PX4 launch Gazebo instead and never connects."""
 
     sys_autostart: Optional[int] = None
     """PX4 ``PX4_SYS_AUTOSTART`` airframe id. If None, PX4 picks it from ``airframe``."""
