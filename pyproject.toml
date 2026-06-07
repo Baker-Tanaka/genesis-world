@@ -75,6 +75,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# PX4 SITL bridge (gs.px4): MAVLink HIL communication with the PX4 flight stack.
+px4 = [
+    "pymavlink",
+]
 dev = [
     "black",
     "pytest",

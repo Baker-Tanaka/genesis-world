@@ -514,5 +514,9 @@ from .engine.scene import Scene
 
 from . import recorders
 
+# PX4 SITL bridge plugin (gs.px4). Heavy/optional deps (pymavlink) are imported lazily
+# inside the bridge, so this import is safe even when they are not installed.
+from .ext import px4
+
 for name, member in _gs_backend.__members__.items():
     globals()[name] = member
