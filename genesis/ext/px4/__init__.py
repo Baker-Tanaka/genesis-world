@@ -20,8 +20,19 @@ its offboard endpoint with :class:`~genesis.ext.px4.OffboardPilot`::
     pilot.broadcast_position(0, 0, -3)   # climb to 3 m (NED down is negative)
 """
 
+from .airframe import QuadXLayout, quad_x_layout, quad_x_motor_mapping, quad_x_propeller_spin, read_propeller_positions
 from .bridge import PX4Bridge
 from .offboard import OffboardClient, OffboardPilot
 from .options import PX4Options
 
-__all__ = ["PX4Bridge", "OffboardClient", "OffboardPilot", "PX4Options"]
+__all__ = [
+    "PX4Bridge",
+    "OffboardClient",
+    "OffboardPilot",
+    "PX4Options",
+    "QuadXLayout",
+    "quad_x_layout",
+    "quad_x_motor_mapping",
+    "quad_x_propeller_spin",
+    "read_propeller_positions",
+]

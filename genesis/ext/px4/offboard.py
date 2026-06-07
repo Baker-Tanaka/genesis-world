@@ -21,7 +21,11 @@ Exposed as ``gs.px4``::
 
 import time
 
+import numpy as np
+
 import genesis as gs
+
+from . import geo
 
 # SET_POSITION_TARGET_LOCAL_NED ``type_mask`` bits (a set bit means "ignore this field").
 _IGNORE_POS = 0b0000_0000_0000_0111
@@ -117,6 +121,15 @@ class OffboardClient:
             self.target_system, self.target_component,
             m.MAV_CMD_COMPONENT_ARM_DISARM, 0,
             1, 0, 0, 0, 0, 0, 0,
+        )  # fmt: skip
+
+    def disarm(self) -> None:
+        """Request PX4 to disarm via MAV_CMD_COMPONENT_ARM_DISARM (param1 = 0)."""
+        m = self._mavutil.mavlink
+        self.conn.mav.command_long_send(
+            self.target_system, self.target_component,
+            m.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+            0, 0, 0, 0, 0, 0, 0,
         )  # fmt: skip
 
     def close(self) -> None:
@@ -219,6 +232,63 @@ class OffboardPilot:
         for c in self.clients:
             c.pump()
             c.send_velocity_ned(vn, ve, vd, yaw_rate)
+
+    def fly_waypoints(
+        self,
+        drone,
+        waypoints_enu,
+        arrival_radius: float = 0.3,
+        max_steps: int = 200_000,
+        yaw: float = 0.0,
+        hold: bool = True,
+    ) -> int:
+        """Fly a list of local-ENU waypoints, advancing when every drone is within range.
+
+        Each waypoint is converted to PX4 local NED and streamed as a position setpoint;
+        arrival is judged in Genesis ENU from ``drone.get_pos()`` so it is independent of
+        PX4's internal origin. With several instances the route advances only once *all* are
+        within ``arrival_radius``. Returns the number of steps taken.
+
+        Parameters
+        ----------
+        drone : DroneEntity
+            The flown drone, used only for arrival detection via ``get_pos()``.
+        waypoints_enu : sequence of (x, y, z)
+            Target positions in the local ENU frame (metres relative to the start).
+        hold : bool
+            If True keep streaming the final waypoint until ``max_steps``; if False return as
+            soon as it is reached.
+        """
+        targets_ned = [geo.enu_to_ned(np.asarray(wp, dtype=np.float64)) for wp in waypoints_enu]
+        targets_enu = [np.asarray(wp, dtype=np.float64) for wp in waypoints_enu]
+        last = len(waypoints_enu) - 1
+        idx = 0
+        reached_final = False
+        gs.logger.info(f"Flying waypoint 0/{last}: {tuple(targets_enu[0])} (ENU).")
+        for step in range(max_steps):
+            ned = targets_ned[idx]
+            self.broadcast_position(ned[0], ned[1], ned[2], yaw)
+            self._scene.step()
+
+            # drone.get_pos() is (3,) for n_envs=0, else (B, 3).
+            pos = drone.get_pos().detach().cpu().numpy().reshape(-1, 3)
+            if np.all(np.linalg.norm(pos - targets_enu[idx], axis=1) < arrival_radius):
+                if idx < last:
+                    idx += 1
+                    gs.logger.info(
+                        f"Reached waypoint {idx - 1}/{last}; flying to {idx}/{last}: {tuple(targets_enu[idx])} (ENU)."
+                    )
+                elif not reached_final:
+                    reached_final = True
+                    gs.logger.info(f"Reached final waypoint {last}/{last}.")
+                    if not hold:
+                        return step + 1
+        return max_steps
+
+    def disarm(self) -> None:
+        """Request every instance to disarm."""
+        for c in self.clients:
+            c.disarm()
 
     def close(self) -> None:
         for c in self.clients:

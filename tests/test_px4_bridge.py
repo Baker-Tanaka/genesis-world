@@ -420,3 +420,48 @@ def test_offboard_arm_and_mode_commands():
     arm = cmds.get(mavlink2.MAV_CMD_COMPONENT_ARM_DISARM)
     assert arm is not None
     assert int(arm.param1) == 1  # arm
+
+
+# ==========================================================================================
+# airframe.py  -- auto quad-X layout from the URDF geometry (pure, no GPU / PX4)
+# ==========================================================================================
+
+
+@pytest.mark.required
+def test_quad_x_motor_mapping_and_spin_from_positions():
+    from genesis.ext.px4 import airframe
+
+    # cf2x propeller order (body FLU x=fwd, y=left): FR, BR, BL, FL.
+    cf2x = np.array([[0.028, -0.028, 0.0], [-0.028, -0.028, 0.0], [-0.028, 0.028, 0.0], [0.028, 0.028, 0.0]])
+    # PX4 channels (FR, RL, FL, RR) -> cf2x props.
+    assert airframe.quad_x_motor_mapping(cf2x) == (0, 2, 3, 1)
+    assert airframe.quad_x_propeller_spin(cf2x) == (-1, 1, -1, 1)  # matches cf2x's URDF default
+
+    # racer numbers its props in a different order (FL, RL, RR, FR), so the layout differs.
+    racer = np.array([[0.085, 0.0675, 0.0], [-0.085, 0.0675, 0.0], [-0.085, -0.0675, 0.0], [0.085, -0.0675, 0.0]])
+    assert airframe.quad_x_motor_mapping(racer) == (3, 1, 0, 2)
+    assert airframe.quad_x_propeller_spin(racer) == (1, -1, 1, -1)
+
+
+@pytest.mark.required
+def test_quad_x_rejects_plus_layout():
+    from genesis.ext.px4 import airframe
+
+    # cf2p (plus): propellers sit on the body axes, so there are no X corners.
+    plus = np.array([[0.04, 0.0, 0.0], [0.0, 0.04, 0.0], [-0.04, 0.0, 0.0], [0.0, -0.04, 0.0]])
+    with pytest.raises(gs.GenesisException):
+        airframe.quad_x_propeller_spin(plus)
+    with pytest.raises(gs.GenesisException):
+        airframe.quad_x_motor_mapping(plus)
+
+
+@pytest.mark.required
+def test_quad_x_layout_from_cf2x_urdf():
+    from genesis.ext.px4 import airframe
+
+    layout = airframe.quad_x_layout("urdf/drones/cf2x.urdf")
+    assert layout.motor_mapping == (0, 2, 3, 1)
+    assert layout.propellers_spin == (-1, 1, -1, 1)
+    # cf2x: mass 0.027 kg, kf 3.16e-10 -> hover ~14.5k rpm, max_rpm = hover / 0.5.
+    assert abs(layout.hover_rpm - 14478.0) < 50.0
+    assert abs(layout.max_rpm - 2.0 * layout.hover_rpm) < 1e-6
