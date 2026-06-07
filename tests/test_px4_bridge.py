@@ -317,11 +317,106 @@ def test_bridge_disarmed_zero_rpm():
 @pytest.mark.required
 def test_bridge_motor_mapping_unbatched():
     # n_envs=0 exercises the unbatched set_propellers_rpm path; mapping reverses channels.
-    rpm, last = _run_bridge(
-        n_envs=0, controls=[0.1, 0.2, 0.3, 0.4], armed=True, motor_mapping=(3, 2, 1, 0)
-    )
+    rpm, last = _run_bridge(n_envs=0, controls=[0.1, 0.2, 0.3, 0.4], armed=True, motor_mapping=(3, 2, 1, 0))
     assert rpm.shape == (1, 4)
     expected = np.array([0.4, 0.3, 0.2, 0.1]) * 25000.0
     assert_allclose(rpm[0], expected, tol=1e-3)
     assert last.shape == (4,)  # unbatched apply
     assert_allclose(last, expected, tol=1e-3)
+
+
+# ==========================================================================================
+# offboard.py  -- MAVLink setpoint/command encoding (requires pymavlink, no GPU / PX4)
+# ==========================================================================================
+
+
+def _capture_offboard_client():
+    """An OffboardClient bound to an ephemeral UDP port whose sends are captured in a buffer."""
+    import io
+
+    from pymavlink.dialects.v20 import common as mavlink2
+
+    from genesis.ext.px4.offboard import OffboardClient
+
+    client = OffboardClient("127.0.0.1", 0)  # port 0 -> OS picks a free port
+    buf = io.BytesIO()
+    client.conn.mav = mavlink2.MAVLink(buf, srcSystem=1, srcComponent=1)
+    client.target_system = 7
+    client.target_component = 1
+    return client, buf
+
+
+def _decode_one(buf, msg_type):
+    from pymavlink.dialects.v20 import common as mavlink2
+
+    return _find_msg(mavlink2.MAVLink(None).parse_buffer(buf.getvalue()) or [], msg_type)
+
+
+@pytest.mark.required
+def test_offboard_position_setpoint_encoding():
+    pytest.importorskip("pymavlink")
+    from pymavlink.dialects.v20 import common as mavlink2
+
+    client, buf = _capture_offboard_client()
+    try:
+        client.send_position_ned(1.0, 2.0, -3.0, yaw=0.5)
+    finally:
+        client.close()
+
+    m = _decode_one(buf, "SET_POSITION_TARGET_LOCAL_NED")
+    assert m is not None
+    assert m.coordinate_frame == mavlink2.MAV_FRAME_LOCAL_NED
+    assert m.target_system == 7
+    # Position is commanded; velocity / acceleration / yaw_rate are ignored.
+    assert m.type_mask & 0b0000_0000_0000_0111 == 0  # position bits used
+    assert m.type_mask & 0b0000_0000_0011_1000 == 0b0000_0000_0011_1000  # velocity ignored
+    assert m.type_mask & 0b0000_1000_0000_0000  # yaw_rate ignored
+    assert_allclose([m.x, m.y, m.z], [1.0, 2.0, -3.0])
+    assert_allclose(m.yaw, 0.5)
+
+
+@pytest.mark.required
+def test_offboard_velocity_setpoint_encoding():
+    pytest.importorskip("pymavlink")
+    from pymavlink.dialects.v20 import common as mavlink2
+
+    client, buf = _capture_offboard_client()
+    try:
+        client.send_velocity_ned(0.5, -0.5, -1.0, yaw_rate=0.2)
+    finally:
+        client.close()
+
+    m = _decode_one(buf, "SET_POSITION_TARGET_LOCAL_NED")
+    assert m is not None
+    assert m.coordinate_frame == mavlink2.MAV_FRAME_LOCAL_NED
+    # Velocity is commanded; position / acceleration / yaw (angle) are ignored.
+    assert m.type_mask & 0b0000_0000_0011_1000 == 0  # velocity bits used
+    assert m.type_mask & 0b0000_0000_0000_0111 == 0b0000_0000_0000_0111  # position ignored
+    assert m.type_mask & 0b0000_0100_0000_0000  # yaw (angle) ignored
+    assert_allclose([m.vx, m.vy, m.vz], [0.5, -0.5, -1.0])
+    assert_allclose(m.yaw_rate, 0.2)
+
+
+@pytest.mark.required
+def test_offboard_arm_and_mode_commands():
+    pytest.importorskip("pymavlink")
+    from pymavlink.dialects.v20 import common as mavlink2
+
+    client, buf = _capture_offboard_client()
+    try:
+        client.set_offboard_mode()
+        client.arm()
+    finally:
+        client.close()
+
+    msgs = mavlink2.MAVLink(None).parse_buffer(buf.getvalue()) or []
+    cmds = {m.command: m for m in msgs if m.get_type() == "COMMAND_LONG"}
+
+    set_mode = cmds.get(mavlink2.MAV_CMD_DO_SET_MODE)
+    assert set_mode is not None
+    assert int(set_mode.param1) & mavlink2.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+    assert int(set_mode.param2) == 6  # PX4 main mode OFFBOARD
+
+    arm = cmds.get(mavlink2.MAV_CMD_COMPONENT_ARM_DISARM)
+    assert arm is not None
+    assert int(arm.param1) == 1  # arm

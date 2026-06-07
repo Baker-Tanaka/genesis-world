@@ -10,9 +10,18 @@ Exposed as ``gs.px4``::
     px4.start()
     ...
     px4.stop()
+
+To *command* flight from the script (instead of an external ground station), drive PX4 over
+its offboard endpoint with :class:`~genesis.ext.px4.OffboardPilot`::
+
+    pilot = gs.px4.OffboardPilot(scene, px4.mavlink_endpoints)
+    pilot.wait_until_connected()
+    pilot.engage()                       # OFFBOARD + arm
+    pilot.broadcast_position(0, 0, -3)   # climb to 3 m (NED down is negative)
 """
 
 from .bridge import PX4Bridge
+from .offboard import OffboardClient, OffboardPilot
 from .options import PX4Options
 
-__all__ = ["PX4Bridge", "PX4Options"]
+__all__ = ["PX4Bridge", "OffboardClient", "OffboardPilot", "PX4Options"]
