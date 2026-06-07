@@ -6,9 +6,9 @@ IMU/GPS/baro to PX4 and applies the motor commands PX4 returns, in lockstep, whi
 :class:`~genesis.ext.px4.OffboardPilot` arms PX4, switches it to OFFBOARD mode and flies a
 list of waypoints over PX4's offboard MAVLink endpoint (``udp://:14540`` for instance 0).
 
-Any X-quad URDF works: :func:`gs.px4.quad_x_layout` derives the PX4 motor mapping, propeller
-spin directions and thrust scale from the URDF geometry, so ``--drone`` can point at a
-different airframe with no hand-tuning.
+The Crazyflie ``cf2x`` PX4 configuration (motor mapping, propeller spins, thrust scale) is
+derived from the URDF geometry by :func:`gs.px4.quad_x_layout`, so there is nothing to
+hand-tune.
 
 Prerequisites
 -------------
@@ -17,11 +17,8 @@ Prerequisites
 
 Examples
 --------
-    # Default Crazyflie route, with the viewer and balloon waypoint markers.
+    # Fly the default route, with the viewer and balloon waypoint markers.
     python examples/drone/px4_sitl.py --px4-dir ~/PX4-Autopilot -v
-
-    # A different (heavier) X-quad URDF.
-    python examples/drone/px4_sitl.py --px4-dir ~/PX4-Autopilot --drone urdf/drones/racer.urdf -v
 
     # Two drones flying the same route.
     python examples/drone/px4_sitl.py --px4-dir ~/PX4-Autopilot --n-envs 2
@@ -30,6 +27,8 @@ Examples
 import argparse
 
 import genesis as gs
+
+DRONE_URDF = "urdf/drones/cf2x.urdf"
 
 # Default waypoint route, local ENU metres relative to the start: take off, fly a square at
 # altitude, then descend. Overridable with --waypoints.
@@ -90,13 +89,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--px4-dir", type=str, required=True, help="Path to a built PX4-Autopilot checkout.")
     parser.add_argument(
-        "--drone",
-        type=str,
-        default="urdf/drones/cf2x.urdf",
-        help="X-quad drone URDF (assets-relative or absolute). PX4 mapping/spin/thrust scale "
-        "are auto-derived from its geometry. e.g. urdf/drones/cf2x.urdf, urdf/drones/racer.urdf.",
-    )
-    parser.add_argument(
         "--airframe",
         type=str,
         default="none_iris",
@@ -121,10 +113,10 @@ def main():
     gs.init(backend=gs.gpu)
 
     # Derive the PX4 quad-X configuration (channel mapping, spins, thrust scale) from the URDF.
-    layout = gs.px4.quad_x_layout(args.drone)
+    layout = gs.px4.quad_x_layout(DRONE_URDF)
     max_rpm = layout.max_rpm if layout.max_rpm is not None else 25000.0
     gs.logger.info(
-        f"Drone '{args.drone}': motor_mapping={layout.motor_mapping}, "
+        f"cf2x PX4 config: motor_mapping={layout.motor_mapping}, "
         f"propellers_spin={layout.propellers_spin}, max_rpm={max_rpm:.0f}."
     )
 
@@ -140,7 +132,7 @@ def main():
 
     scene.add_entity(gs.morphs.Plane())
     drone = scene.add_entity(
-        gs.morphs.Drone(file=args.drone, pos=(0.0, 0.0, 0.2), propellers_spin=layout.propellers_spin)
+        gs.morphs.Drone(file=DRONE_URDF, pos=(0.0, 0.0, 0.2), propellers_spin=layout.propellers_spin)
     )
     add_waypoint_markers(scene, waypoints_enu)
 
@@ -169,13 +161,12 @@ def main():
     )
 
     with px4:
-        print("PX4 offboard endpoints (also reachable from QGC / MAVSDK):")
-        for i, (host, port) in enumerate(px4.mavlink_endpoints):
-            print(f"  instance {i}: udp://{host}:{port}")
+        endpoints = ", ".join(f"udp://{host}:{port}" for host, port in px4.mavlink_endpoints)
+        gs.logger.info(f"PX4 SITL launched; HIL link up. Offboard endpoints (QGC/MAVSDK): {endpoints}")
 
-        with gs.px4.OffboardPilot(scene, px4.mavlink_endpoints) as pilot:
+        with gs.px4.OffboardPilot(scene, px4.mavlink_endpoints, bridge=px4) as pilot:
             try:
-                pilot.wait_until_connected()
+                pilot.wait_until_connected()  # physics paused while PX4 boots
                 pilot.engage(warmup_steps=args.warmup_steps)
                 pilot.fly_waypoints(drone, waypoints_enu, arrival_radius=args.arrival_radius, max_steps=args.steps)
             except KeyboardInterrupt:

@@ -64,9 +64,7 @@ class PX4Bridge:
         if mapping is None:
             mapping = tuple(range(self._n_prop))
         if len(mapping) < self._n_prop:
-            gs.raise_exception(
-                f"motor_mapping has {len(mapping)} entries but drone has {self._n_prop} propellers."
-            )
+            gs.raise_exception(f"motor_mapping has {len(mapping)} entries but drone has {self._n_prop} propellers.")
         self._motor_mapping = np.asarray(mapping[: self._n_prop], dtype=np.int64)
 
         # Last commanded RPM (B, n_prop); applied when an instance reports no fresh command.
@@ -176,11 +174,23 @@ class PX4Bridge:
         self.update()
         return False  # never veto the physics advance
 
-    def update(self) -> np.ndarray:
+    def pump(self) -> np.ndarray:
+        """Run one sensor<->actuator exchange that advances PX4's clock WITHOUT stepping the
+        physics or driving the motors.
+
+        Use while PX4 is still booting/connecting: the drone holds its current (resting) pose,
+        PX4 still gets a steady sensor stream and boots its EKF, but the (comparatively
+        expensive) physics solve and viewer render are skipped entirely.
+        """
+        return self.update(apply=False)
+
+    def update(self, apply: bool = True) -> np.ndarray:
         """Perform one sensor->PX4->actuator exchange and apply the resulting RPMs.
 
         Returns the applied RPM array, shape ``(B, n_prop)``. Can be called manually (with
-        ``auto_spawn=False`` and no registered callback) right before ``scene.step()``.
+        ``auto_spawn=False`` and no registered callback) right before ``scene.step()``. With
+        ``apply=False`` the motor command is computed but not written to the drone (used by
+        :meth:`pump` during boot, where physics is not advancing).
         """
         sensors = self._read_state()
         time_usec = int(round(self._sim_time * 1e6))
@@ -236,7 +246,8 @@ class PX4Bridge:
             rpm[i] = env_rpm
         self._last_rpm = rpm
 
-        self._apply_rpm(rpm)
+        if apply:
+            self._apply_rpm(rpm)
 
         self._sim_time += self._scene.dt
         self._step += 1
@@ -317,9 +328,7 @@ class PX4Bridge:
         while pending:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                gs.raise_exception(
-                    f"Lockstep timeout: no actuator command from PX4 instances {sorted(pending)}."
-                )
+                gs.raise_exception(f"Lockstep timeout: no actuator command from PX4 instances {sorted(pending)}.")
             consume(self._selector.select(timeout=remaining))
         return controls, armed
 

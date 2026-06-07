@@ -144,8 +144,9 @@ class OffboardPilot:
     command); reach individual instances through :attr:`clients` for per-drone control.
     """
 
-    def __init__(self, scene, endpoints):
+    def __init__(self, scene, endpoints, bridge=None):
         self._scene = scene
+        self._bridge = bridge
         self.clients: list[OffboardClient] = [OffboardClient(host, port) for host, port in endpoints]
 
     def __len__(self) -> int:
@@ -161,51 +162,66 @@ class OffboardPilot:
         for c in self.clients:
             c.pump()
 
-    def _boot_step(self) -> None:
-        """Advance the lockstep exchange as fast as possible, bypassing the viewer.
-
-        PX4's boot/arm is dead time the user does not need to watch, and it costs many sim
-        steps (EKF/GPS convergence). Stepping with ``update_visualizer=False`` skips the
-        realtime pacer and the (often software) render, so PX4 advances its clock at the
-        physics rate instead of being throttled to wall-clock real time.
-        """
+    def _fast_step(self) -> None:
+        """Step physics with the viewer disabled (skips the realtime pacer + render)."""
         self._scene.step(update_visualizer=False)
 
-    def wait_until_connected(self, timeout: float = 60.0) -> None:
-        """Step the scene until every PX4 instance has heartbeated (finished booting).
+    def _pump_step(self) -> None:
+        """Advance PX4 while it is booting (disarmed), without physics or rendering.
 
-        PX4's lockstep boot needs the HIL sensor stream, which only flows while the scene is
-        stepping, so we drive ``scene.step()`` here rather than blocking on a bare socket.
+        With a bridge we :meth:`~PX4Bridge.pump` it -- PX4 still gets its sensor<->actuator
+        exchange and boots, while the drone holds its resting pose and the (comparatively
+        expensive) physics solve and viewer are skipped. Without a bridge we fall back to a
+        viewer-less step. Only safe while PX4 is disarmed: once it commands motors the control
+        loop must be closed, so :meth:`engage` and flight use real physics steps.
         """
+        if self._bridge is not None:
+            self._bridge.pump()
+        else:
+            self._scene.step(update_visualizer=False)
+
+    def wait_until_connected(self, timeout: float = 60.0, settle_steps: int = 50) -> None:
+        """Wait until every PX4 instance has heartbeated (finished booting), physics paused.
+
+        PX4's lockstep boot needs a steady sensor stream, but not a moving vehicle, so once the
+        drone has settled (``settle_steps`` real steps to put it at rest and populate the
+        sensors) we hold its pose and only :meth:`~PX4Bridge.pump` the MAVLink exchange -- no
+        physics, no render -- which is far cheaper per step than a full ``scene.step()``.
+        """
+        if self._bridge is not None:
+            for _ in range(settle_steps):
+                self._scene.step(update_visualizer=False)
+
+        gs.logger.info("Waiting for PX4 to boot and connect (physics paused)...")
         deadline = time.monotonic() + timeout
         while not all(c.connected for c in self.clients):
             self._pump()
-            self._boot_step()
+            self._pump_step()
             if time.monotonic() > deadline:
                 gs.raise_exception(
                     f"No PX4 heartbeat on the offboard endpoint(s) within {timeout:.0f}s. "
                     "Is PX4 SITL running and connected to the bridge?"
                 )
-        gs.logger.info(f"All {len(self.clients)} PX4 instance(s) connected on the offboard link.")
+        gs.logger.info(f"PX4 connected ({len(self.clients)} instance(s)).")
 
     def engage(self, warmup_steps: int = 200, timeout: float = 30.0) -> None:
         """Stream a hover setpoint, then switch every instance to OFFBOARD and arm it.
 
         PX4 rejects OFFBOARD unless a setpoint stream is already flowing, so we warm up the
         stream first, then re-request mode + arm each step until every instance reports armed.
-        Runs uncapped (no viewer) so the EKF/GPS preflight checks clear quickly.
+        Runs with real physics (the drone responds to PX4 once armed) but no viewer, so it is
+        fast while keeping the control loop closed.
         """
         for _ in range(warmup_steps):
             self.broadcast_velocity(0.0, 0.0, 0.0)
-            self._boot_step()
+            self._fast_step()
 
-        gs.logger.info("Requesting OFFBOARD mode and arming.")
+        gs.logger.info("Arming and switching to OFFBOARD...")
         deadline = time.monotonic() + timeout
         step = 0
         while not all(c.armed for c in self.clients):
             # Stream setpoints every step (offboard stays alive), but re-request mode/arm only
-            # a few times a second -- the loop runs uncapped, so doing it every step would spam
-            # PX4 with thousands of commands per second.
+            # a few times a second -- doing it every step would spam PX4 with commands.
             request = (step % 25) == 0
             for c in self.clients:
                 c.pump()
@@ -213,13 +229,13 @@ class OffboardPilot:
                 if request and not c.armed:
                     c.set_offboard_mode()
                     c.arm()
-            self._boot_step()
+            self._fast_step()
             step += 1
             if time.monotonic() > deadline:
                 gs.logger.warning("Some PX4 instance(s) did not confirm armed; continuing anyway.")
                 break
         else:
-            gs.logger.info("PX4 armed and in OFFBOARD.")
+            gs.logger.info("Armed; OFFBOARD engaged.")
 
     def broadcast_position(self, north: float, east: float, down: float, yaw: float = 0.0) -> None:
         """Pump telemetry and send the same NED position setpoint to every instance."""
@@ -241,6 +257,7 @@ class OffboardPilot:
         max_steps: int = 200_000,
         yaw: float = 0.0,
         hold: bool = True,
+        check_every: int = 10,
     ) -> int:
         """Fly a list of local-ENU waypoints, advancing when every drone is within range.
 
@@ -258,6 +275,9 @@ class OffboardPilot:
         hold : bool
             If True keep streaming the final waypoint until ``max_steps``; if False return as
             soon as it is reached.
+        check_every : int
+            Test arrival every N steps. Each test reads ``drone.get_pos()`` (a GPU<->CPU sync),
+            so checking at ~25 Hz instead of every step keeps the step loop lighter.
         """
         targets_ned = [geo.enu_to_ned(np.asarray(wp, dtype=np.float64)) for wp in waypoints_enu]
         targets_enu = [np.asarray(wp, dtype=np.float64) for wp in waypoints_enu]
@@ -270,6 +290,8 @@ class OffboardPilot:
             self.broadcast_position(ned[0], ned[1], ned[2], yaw)
             self._scene.step()
 
+            if step % check_every:
+                continue
             # drone.get_pos() is (3,) for n_envs=0, else (B, 3).
             pos = drone.get_pos().detach().cpu().numpy().reshape(-1, 3)
             if np.all(np.linalg.norm(pos - targets_enu[idx], axis=1) < arrival_radius):
