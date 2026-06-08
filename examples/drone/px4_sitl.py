@@ -31,7 +31,7 @@ import genesis as gs
 DRONE_URDF = "urdf/drones/cf2x.urdf"
 
 # Default waypoint route, local ENU metres relative to the start: take off, fly a square at
-# altitude, then descend. Overridable with --waypoints.
+# altitude, then descend.
 DEFAULT_WAYPOINTS_ENU = [
     (0.0, 0.0, 3.0),
     (3.0, 0.0, 3.0),
@@ -40,22 +40,6 @@ DEFAULT_WAYPOINTS_ENU = [
     (0.0, 0.0, 3.0),
     (0.0, 0.0, 1.0),
 ]
-
-
-def parse_waypoints(spec: str) -> list[tuple[float, float, float]]:
-    """Parse a ``"x,y,z;x,y,z;..."`` ENU waypoint string into a list of (x, y, z) tuples."""
-    waypoints = []
-    for chunk in spec.split(";"):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        parts = chunk.split(",")
-        if len(parts) != 3:
-            raise ValueError(f"Waypoint '{chunk}' must have exactly 3 comma-separated values (x,y,z).")
-        waypoints.append(tuple(float(p) for p in parts))
-    if not waypoints:
-        raise ValueError("--waypoints did not contain any waypoints.")
-    return waypoints
 
 
 def add_waypoint_markers(scene, waypoints_enu):
@@ -104,11 +88,10 @@ def main():
         default=None,
         help='Waypoint route as ENU "x,y,z;x,y,z;...". Defaults to a takeoff + square route.',
     )
-    parser.add_argument("--warmup-steps", type=int, default=200, help="Setpoint-stream warm-up steps before arming.")
     parser.add_argument("--arrival-radius", type=float, default=0.3, help="Waypoint arrival threshold [m].")
     args = parser.parse_args()
 
-    waypoints_enu = parse_waypoints(args.waypoints) if args.waypoints else DEFAULT_WAYPOINTS_ENU
+    waypoints_enu = DEFAULT_WAYPOINTS_ENU
 
     gs.init(backend=gs.gpu)
 
