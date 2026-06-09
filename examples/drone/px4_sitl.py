@@ -82,12 +82,7 @@ def main():
     parser.add_argument("--n-envs", type=int, default=1, help="Number of parallel drones / PX4 instances.")
     parser.add_argument("--steps", type=int, default=200000)
     parser.add_argument("-v", "--vis", action="store_true", default=False)
-    parser.add_argument(
-        "--waypoints",
-        type=str,
-        default=None,
-        help='Waypoint route as ENU "x,y,z;x,y,z;...". Defaults to a takeoff + square route.',
-    )
+    parser.add_argument("--warmup-steps", type=int, default=200, help="Setpoint-stream warm-up steps before arming.")
     parser.add_argument("--arrival-radius", type=float, default=0.3, help="Waypoint arrival threshold [m].")
     args = parser.parse_args()
 
